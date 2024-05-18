@@ -80,10 +80,10 @@ class ImageMatcher:
         return ImagePair(self.images[i], self.images[j], H, src_pts, dst_pts, i, j)
 
 
-def load_video(path: str, grayscale: bool = True) -> list[np.ndarray]:
+def load_video(path: str, grayscale: bool = True, n_frames: int = 99999) -> list[np.ndarray]:
     cap = cv2.VideoCapture(path)
     frames = []
-    while True:
+    for _ in range(n_frames):
         ret, frame = cap.read()
         if not ret:
             break
@@ -152,3 +152,12 @@ def export_image_pairs(path: str, ps: list[ImagePair]):
 
         f.attrs['n_pairs'] = len(ps)
         f.create_dataset('cam_indices', data=sorted(indices.keys()))
+
+
+def import_optimized_cam_params(path: str) -> dict[np.ndarray]:
+    cam_params = {}
+    with h5py.File(path, 'r') as f:
+        for d in f.values():
+            cam_idx = d.attrs['cam_idx']
+            cam_params[cam_idx] = np.array(d)
+    return cam_params
