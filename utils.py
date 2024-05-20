@@ -23,41 +23,96 @@ class ImagePair:
     j: int = None
 
 
+def orb_flann_factory(nfeatures=5000):
+    FLANN_INDEX_LSH = 6
+    detector = cv2.ORB_create(nfeatures=nfeatures)
+    flann = cv2.FlannBasedMatcher(
+        indexParams={
+            'algorithm': FLANN_INDEX_LSH,
+            'table_number': 6,
+            'key_size': 12,
+            'multi_probe_level': 1},
+        searchParams={'checks': 50},
+    )
+    return detector, flann
+
+
+def sift_flann_factory(nfeatures=5000):
+    FLANN_INDEX_KDTREE = 1
+    detector = cv2.SIFT_create(nfeatures=nfeatures)
+    flann = cv2.FlannBasedMatcher(
+        indexParams={
+            'algorithm': FLANN_INDEX_KDTREE,
+            'trees': 5},
+        searchParams={'checks': 50},
+    )
+    return detector, flann
+
+def akaze_flann_factory():
+    FLANN_INDEX_LSH = 6
+    detector = cv2.AKAZE_create()
+    flann = cv2.FlannBasedMatcher(
+        indexParams={
+            'algorithm': FLANN_INDEX_LSH,
+            'table_number': 16,
+            'key_size': 20,
+            'multi_probe_level': 2},
+        searchParams={'checks': 50},
+    )
+    return detector, flann
+
+
 class ImageMatcher:
 
-    def __init__(self, images, min_match_count=300, ransac_reproj_thresh=3.0, percent=0.2):
-
-        FLANN_INDEX_KDTREE = 1
+    def __init__(self, images: list[np.ndarray], keyframe_interval: int = 30):
 
         self.images = images
-        self.min_match_count = min_match_count
-        self.ransac_reproj_thresh = ransac_reproj_thresh
-        self.percent = percent
+        self.keyframe_interval = keyframe_interval
 
-        # To use ORB features, the flannMatcher needs to be modified. See:
-        # https://docs.opencv.org/4.x/dc/dc3/tutorial_py_matcher.html
-        self.detector = cv2.SIFT_create()
+        self.orb_detector, self.orb_flann = orb_flann_factory(1000)
+        self.sift_detector, self.sift_flann = sift_flann_factory(1000)
 
-        self.flann = cv2.FlannBasedMatcher(
-            indexParams={'algorithm': FLANN_INDEX_KDTREE, 'trees': 5},
-            searchParams={'checks': 50},
-        )
+        self.orb_kds = [self.orb_detector.detectAndCompute(i, None)
+                        for i in self.images]
 
-        self.kds = [self.detector.detectAndCompute(i, None) for i in self.images]
+        self.sift_kds = []
+        for i, img in enumerate(self.images):
+            if i % keyframe_interval == 0:
+                self.sift_kds.append(self.sift_detector.detectAndCompute(img, None))
+            else:
+                self.sift_kds.append(None)
 
-    def match(self, i: int, j: int) -> ImagePair | None:
+    def match(self, i: int, j: int,
+              method: str='orb',
+              min_match_count: int = 400,
+              keep_percent: float = 1.0,
+              ransac_reproj_thresh: float = 2.0,
+              ransac_max_iters: int = 2000,
+              verbose=False) -> ImagePair | None:
 
-        kp1, des1 = self.kds[i]
-        kp2, des2 = self.kds[j]
+        flann = getattr(self, method + '_flann')
+        kds = getattr(self, method + '_kds')
 
-        matches = self.flann.knnMatch(des1, des2, k=2)
+        kp1, des1 = kds[i]
+        kp2, des2 = kds[j]
+
+        matches = flann.knnMatch(des1, des2, k=2)
 
         good = []
-        for m, n in matches:
-            if m.distance < 0.7 * n.distance:
-                good.append(m)
+        for m in matches:
+            # Sometimes OpenCV will return just 1 nearest neighbour,
+            # so we cannot apply the ratio test. Skip such cases.
+            if len(m) < 2:
+                if verbose:
+                    print('Warning: insufficient neighbours for ratio test. Skipping.')
+                continue
+            a, b = m
+            if a.distance < 0.7 * b.distance:
+                good.append(a)
 
-        if len(good) < self.min_match_count:
+        if len(good) < min_match_count:
+            if verbose:
+                print(f'Warning: {len(good)} matches after ratio test is below threshold.')
             return None
 
         src_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1, 2)
@@ -67,27 +122,48 @@ class ImageMatcher:
             src_pts,
             dst_pts,
             cv2.RANSAC,
-            ransacReprojThreshold=self.ransac_reproj_thresh,
+            ransacReprojThreshold=ransac_reproj_thresh,
+            maxIters=ransac_max_iters,
+            confidence=0.99,
         )
 
         if H is None:
+            if verbose:
+                print(f'Warning: failed to find homography.')
             return None
 
         mask = mask.astype(bool).ravel()
-        src_pts = src_pts[mask][::int(1 / self.percent)]
-        dst_pts = dst_pts[mask][::int(1 / self.percent)]
+        src_pts = src_pts[mask][::int(1 / keep_percent)]
+        dst_pts = dst_pts[mask][::int(1 / keep_percent)]
+
+        assert len(src_pts) == len(dst_pts)
+
+        if len(src_pts) < min_match_count:
+            if verbose:
+                print(f'Warning: {len(src_pts)} matches after homography RANSAC is below threshold.')
+            return None
 
         return ImagePair(self.images[i], self.images[j], H, src_pts, dst_pts, i, j)
 
 
-def load_video(path: str, grayscale: bool = True, n_frames: int = 99999) -> list[np.ndarray]:
+def load_video(path: str, grayscale: bool = True,
+               frame_segment: tuple[int, int] = (0, 99999)) -> list[np.ndarray]:
     cap = cv2.VideoCapture(path)
     frames = []
-    for _ in range(n_frames):
+
+    for i in range(0, frame_segment[0] + frame_segment[1]):
+
         ret, frame = cap.read()
         if not ret:
             break
+
+        if i < frame_segment[0]:
+            #frames.append(None)
+            continue
+
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if grayscale else frame)
+
+    cap.release()
     return frames
 
 
@@ -117,17 +193,17 @@ def reprojection_error(H, src_pts, dst_pts, plot=False):
 def visualize_matches(pair: ImagePair):
 
     axs: tuple[Axes]
-    fig, axs = plt.subplots(1, 2, dpi=150)
+    fig, axs = plt.subplots(1, 2, dpi=100)
     a1, a2 = axs
 
     for a in axs:
         a.set_axis_off()
 
     a1.imshow(pair.img1, 'gray')
-    a1.scatter(*pair.src_pts.T, c='r', marker='.', s=2, lw=1)
+    a1.scatter(*pair.src_pts.T, c='lime', marker='.', s=1, lw=1)
 
     a2.imshow(pair.img2, 'gray')
-    a2.scatter(*pair.dst_pts.T, c='r', marker='.', s=2, lw=1)
+    a2.scatter(*pair.dst_pts.T, c='lime', marker='.', s=1, lw=1)
 
     fig.tight_layout()
     plt.show()
