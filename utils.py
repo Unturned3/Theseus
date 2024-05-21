@@ -9,6 +9,8 @@ from tqdm import tqdm
 
 import h5py
 
+import re
+from pathlib import Path
 
 @dataclass
 class ImagePair:
@@ -67,8 +69,8 @@ lk_params = dict( winSize  = (15, 15),
                   criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
 feature_params = dict( maxCorners = 2000,
-                       qualityLevel = 0.5,
-                       minDistance = 5,
+                       qualityLevel = 0.3,
+                       minDistance = 7,
                        blockSize = 7 )
 
 
@@ -160,9 +162,9 @@ class ImageMatcher:
 
         assert len(src_pts) == len(dst_pts)
 
-        if len(src_pts) < 80:
+        if len(src_pts) < 50:
             print(f'Warning: {len(src_pts)} matches after optical flow is below threshold.')
-            return None
+            return None, None, None
 
         H, mask = cv2.findHomography(
             src_pts,
@@ -175,7 +177,7 @@ class ImageMatcher:
 
         if H is None:
             print(f'Warning: failed to find homography.')
-            return None
+            return None, None, None
 
         mask = mask.astype(bool).ravel()
         src_pts = src_pts[mask]
@@ -183,9 +185,9 @@ class ImageMatcher:
 
         assert len(src_pts) == len(dst_pts)
 
-        if len(src_pts) < 60:
+        if len(src_pts) < 50:
             print(f'Warning: {len(src_pts)} matches after homography RANSAC is below threshold.')
-            return None
+            return None, None, None
 
         return H, src_pts, dst_pts
 
@@ -194,7 +196,7 @@ class ImageMatcher:
         tracks = []
         prev_frame = None
         track_len = 4
-        detect_interval = 5
+        detect_interval = 2
         for i in tqdm(range(0, len(self.images))):
             frame = self.images[i]
             if len(tracks) > 0:
@@ -326,3 +328,12 @@ def import_optimized_cam_params(path: str) -> dict[np.ndarray]:
             cam_idx = d.attrs['cam_idx']
             cam_params[cam_idx] = np.array(d)
     return cam_params
+
+def parse_vid_name(path: str) -> list[str]:
+    pattern = re.compile(r'^(\d{1})-(\d{1})-v(\d{3})-t(\d{3})\.mp4$')
+    name = Path(path).name
+    match = pattern.match(name)
+    if not match:
+        raise ValueError(f'Invalid video name format: {name}')
+    a, b, v_id, t_id = match.groups()
+    return a, b, v_id, t_id
