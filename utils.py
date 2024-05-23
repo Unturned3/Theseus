@@ -258,14 +258,18 @@ def load_video(path: str, grayscale: bool = True,
     return frames
 
 
-def project_points(H, pts):
+def project_points(H, pts, keep_z=False):
 
     assert H.shape == (3, 3)
-    assert len(pts.shape) == 2 and pts.shape[1] == 2
-
-    o = np.ones([pts.shape[0], 1])
-    pts_h = np.concatenate([pts, o], axis=1)
+    assert len(pts.shape) == 2 and pts.shape[1] in [2, 3]
+    if pts.shape[1] == 2:
+        o = np.ones([pts.shape[0], 1])
+        pts_h = np.concatenate([pts, o], axis=1)
+    else:
+        pts_h = pts
     pts_p = pts_h @ H.T
+    if keep_z:
+        return pts_p
     return pts_p[:, :2] / pts_p[:, 2:3]
 
 
